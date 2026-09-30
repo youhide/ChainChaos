@@ -1,4 +1,4 @@
-# Phase 1 fault rules for `chainchaos proxy --config examples/delay.yaml`.
+# Static fault rules for `chainchaos proxy --config examples/delay.yaml`.
 #
 # Every matching rule fires, in order. A rule without `method` matches every
 # request. `count` limits how many times a rule fires (omit for unlimited).
@@ -15,6 +15,6 @@ faults:
     duration: 2s
     count: 3
 
-  # Small jitter-free baseline latency on everything.
+  # Small baseline latency on everything.
   - type: delay
     duration: 50ms

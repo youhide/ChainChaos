@@ -1,0 +1,29 @@
+# Real-time consumers: missing, duplicated, reordered and delayed
+# notifications, a silent subscription, then a forced reconnect.
+
+seed: 3
+
+faults:
+  - type: ws_drop
+    subscription: logs
+    probability: 0.05
+  - type: ws_duplicate
+    probability: 0.05
+  - type: ws_reorder
+    subscription: newHeads
+    probability: 0.05
+  - type: ws_delay
+    duration: 2s
+    probability: 0.02
+
+scenario:
+  - after: 30s
+    for: 20s
+    inject:
+      type: ws_stale
+      subscription: newHeads
+
+  - after: 60s
+    inject:
+      type: ws_disconnect
+      graceful: true

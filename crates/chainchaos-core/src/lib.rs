@@ -9,9 +9,12 @@ pub mod config;
 pub mod duration;
 pub mod engine;
 pub mod fault;
+pub mod recording;
+pub mod rng;
 pub mod rpc;
 
 pub use config::{ConfigError, FaultConfig};
-pub use engine::{FaultEngine, InjectedFault};
-pub use fault::{Fault, FaultRule, MethodMatcher};
+pub use engine::{FaultEngine, InjectedFault, Tick};
+pub use fault::{Fault, FaultKind, FaultRule, MethodMatcher, ReorgTransactions};
+pub use rng::Rng;
 pub use rpc::{RpcCall, RpcRequest};

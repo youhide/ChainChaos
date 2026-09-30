@@ -1,0 +1,12 @@
+# The node accepts the transaction, but the client sees a timeout.
+# A correct client checks the transaction hash / nonce before resubmitting.
+
+faults:
+  - type: transaction_submit_timeout
+    method: eth_sendRawTransaction
+    duration: 60s
+    count: 1
+
+  # The receipt then takes a few polls to show up.
+  - type: receipt_null
+    count: 3

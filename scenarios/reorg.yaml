@@ -1,0 +1,24 @@
+# Indexer reorg test: sync for a while, then replace the last 3 blocks.
+#
+#   chainchaos proxy --upstream http://127.0.0.1:8545 --scenario scenarios/reorg.yaml
+#   chainchaos replay session.ccr --scenario scenarios/reorg.yaml
+#
+# Request-count triggers make this fully deterministic, independent of
+# timing. Blocks, logs and receipts in the reorged range get new block
+# hashes; queries by the old hashes fail as on a real node.
+
+seed: 7
+
+scenario:
+  - after_requests: 50
+    inject:
+      type: reorg
+      depth: 3
+      transactions: reinclude
+
+  # A second, deeper reorg that drops the transactions this time.
+  - after_requests: 150
+    inject:
+      type: reorg
+      depth: 2
+      transactions: drop

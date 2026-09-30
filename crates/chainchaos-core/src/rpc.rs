@@ -14,6 +14,8 @@ pub struct RpcCall {
     pub method: Option<String>,
     /// The raw `id` field. `None` means the field was absent (a notification).
     pub id: Option<Value>,
+    /// The raw `params` field, if present.
+    pub params: Option<Value>,
 }
 
 /// The inspectable parts of an incoming JSON-RPC request.
@@ -75,12 +77,28 @@ impl RpcRequest {
             _ => Value::Null,
         }
     }
+
+    /// Finds the call a response element belongs to, by id.
+    pub fn call_for_id(&self, id: &Value) -> Option<&RpcCall> {
+        if !self.batch {
+            return self.calls.first();
+        }
+        self.calls.iter().find(|c| c.id.as_ref() == Some(id))
+    }
+}
+
+impl RpcCall {
+    /// Positional parameter `index`, if present.
+    pub fn param(&self, index: usize) -> Option<&Value> {
+        self.params.as_ref()?.as_array()?.get(index)
+    }
 }
 
 fn call_from_object(obj: &serde_json::Map<String, Value>) -> RpcCall {
     RpcCall {
         method: obj.get("method").and_then(Value::as_str).map(str::to_owned),
         id: obj.get("id").cloned(),
+        params: obj.get("params").cloned(),
     }
 }
 

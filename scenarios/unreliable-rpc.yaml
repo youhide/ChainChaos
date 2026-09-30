@@ -1,0 +1,33 @@
+# An overloaded provider: slow, then rate limited, then flaky receipts.
+#
+#   chainchaos proxy --upstream http://127.0.0.1:8545 --scenario scenarios/unreliable-rpc.yaml
+#
+# Time is measured from proxy start. The same seed reproduces the same
+# probabilistic decisions.
+
+seed: 42
+
+scenario:
+  - after: 10s
+    for: 20s
+    inject:
+      type: delay
+      duration: 1500ms
+
+  - after: 20s
+    for: 10s
+    inject:
+      type: http_error
+      status: 429
+      retry_after: 2
+      probability: 0.5
+
+  - after: 40s
+    for: 5s
+    inject:
+      type: receipt_null
+
+  - after: 60s
+    inject:
+      type: reorg
+      depth: 2

@@ -1,0 +1,30 @@
+# A load-balanced provider whose backends disagree about the chain.
+
+seed: 1
+
+faults:
+  # eth_blockNumber reports the real head, block/log/receipt queries are
+  # served by a node 2 blocks behind.
+  - type: inconsistent_head
+    lag: 2
+    probability: 0.3
+
+  # Log queries occasionally come back partial, duplicated or unsorted.
+  - type: missing_logs
+    ratio: 0.2
+    probability: 0.1
+  - type: duplicated_logs
+    ratio: 0.1
+    probability: 0.1
+  - type: reordered_logs
+    probability: 0.1
+
+  # Nonce reads from a stale replica.
+  - type: stale_nonce
+    lag: 1
+    probability: 0.2
+
+  # Receipts that were visible briefly vanish again.
+  - type: receipt_disappear
+    visible_for: 1
+    probability: 0.2

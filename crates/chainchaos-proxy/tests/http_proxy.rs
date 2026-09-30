@@ -1,129 +1,15 @@
-//! End-to-end tests: client -> chainchaos -> fake upstream.
-//!
-//! The fake upstream is a tiny axum server with canned, deliberately oddly
-//! formatted responses, so byte-for-byte transparency can be asserted without
-//! running a real node.
+//! Phase 0: transparent forwarding.
 
-use std::net::SocketAddr;
+mod common;
+
 use std::time::{Duration, Instant};
 
-use axum::Router;
-use axum::body::Bytes;
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use chainchaos_core::FaultConfig;
-use chainchaos_proxy::ProxyConfig;
+use axum::http::{StatusCode, header};
+use chainchaos_proxy::{Proxy, ProxyConfig, ProxyError, UpstreamConfig};
+use common::{post_raw, setup, spawn_node, spawn_proxy};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use url::Url;
-
-async fn fake_upstream(headers: HeaderMap, body: Bytes) -> Response {
-    let Ok(request) = serde_json::from_slice::<Value>(&body) else {
-        let echo = format!("upstream got: {}", String::from_utf8_lossy(&body));
-        return (StatusCode::BAD_REQUEST, echo).into_response();
-    };
-    let mut response = match &request {
-        Value::Array(calls) => {
-            let parts: Vec<String> = calls.iter().map(answer).collect();
-            (StatusCode::OK, format!("[{}]", parts.join(","))).into_response()
-        }
-        call if call["method"] == "http_500" => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "upstream exploded").into_response()
-        }
-        call if call["method"] == "slow" => {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            (StatusCode::OK, answer(call)).into_response()
-        }
-        call => (StatusCode::OK, answer(call)).into_response(),
-    };
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        "application/json".parse().expect("static header"),
-    );
-    if let Some(auth) = headers.get(header::AUTHORIZATION) {
-        response
-            .headers_mut()
-            .insert("x-seen-authorization", auth.clone());
-    }
-    response
-}
-
-/// Hand-written JSON (odd key order and spacing) so any re-serialisation by
-/// the proxy would be detected.
-fn answer(call: &Value) -> String {
-    let id = &call["id"];
-    match call["method"].as_str() {
-        Some("eth_blockNumber") => format!(r#"{{"id": {id},  "jsonrpc":"2.0", "result":"0x10"}}"#),
-        Some("eth_chainId") => format!(r#"{{"jsonrpc":"2.0","result":"0x1","id":{id}}}"#),
-        Some(method) => format!(
-            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32601,"message":"the method {method} does not exist/is not available"}}}}"#
-        ),
-        None => {
-            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid request"}}"#
-                .to_owned()
-        }
-    }
-}
-
-async fn spawn_upstream() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = Router::new().route("/", post(fake_upstream));
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    addr
-}
-
-async fn spawn_proxy(upstream: Url, faults_yaml: &str) -> String {
-    spawn_proxy_with_timeout(upstream, faults_yaml, Duration::from_secs(10)).await
-}
-
-async fn spawn_proxy_with_timeout(
-    upstream: Url,
-    faults_yaml: &str,
-    upstream_timeout: Duration,
-) -> String {
-    let config = ProxyConfig {
-        upstream,
-        upstream_timeout,
-        faults: FaultConfig::from_yaml(faults_yaml).unwrap(),
-    };
-    let app = chainchaos_proxy::router(config).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        chainchaos_proxy::serve(listener, app, std::future::pending())
-            .await
-            .unwrap()
-    });
-    format!("http://{addr}/")
-}
-
-async fn setup(faults_yaml: &str) -> (String, String) {
-    let upstream = format!("http://{}/", spawn_upstream().await);
-    let proxy = spawn_proxy(Url::parse(&upstream).unwrap(), faults_yaml).await;
-    (upstream, proxy)
-}
-
-async fn post_raw(url: &str, body: &str) -> reqwest::Response {
-    reqwest::Client::new()
-        .post(url)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::AUTHORIZATION, "Bearer test-token")
-        .body(body.to_owned())
-        .send()
-        .await
-        .unwrap()
-}
-
-/// Sends the same request directly and through the proxy; returns
-/// (direct, proxied) as (status, content-type, body).
-async fn compare(body: &str) -> ((u16, String, String), (u16, String, String)) {
-    let (upstream, proxy) = setup("{}").await;
-    let direct = snapshot(post_raw(&upstream, body).await).await;
-    let proxied = snapshot(post_raw(&proxy, body).await).await;
-    (direct, proxied)
-}
 
 async fn snapshot(response: reqwest::Response) -> (u16, String, String) {
     let status = response.status().as_u16();
@@ -135,12 +21,20 @@ async fn snapshot(response: reqwest::Response) -> (u16, String, String) {
     (status, content_type, response.text().await.unwrap())
 }
 
+/// Sends the same request directly and through a transparent proxy.
+async fn compare(body: &str) -> ((u16, String, String), (u16, String, String)) {
+    let (node, proxy) = setup("{}").await;
+    let direct = snapshot(post_raw(node.http.as_str(), body).await).await;
+    let proxied = snapshot(post_raw(&proxy, body).await).await;
+    (direct, proxied)
+}
+
 #[tokio::test]
 async fn forwards_requests_transparently() {
     let (direct, proxied) =
         compare(r#"{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}"#).await;
     assert_eq!(direct, proxied);
-    assert_eq!(proxied.2, r#"{"id": 1,  "jsonrpc":"2.0", "result":"0x10"}"#);
+    assert_eq!(proxied.2, r#"{"id": 1,  "jsonrpc":"2.0", "result":"0x64"}"#);
 }
 
 #[tokio::test]
@@ -171,7 +65,7 @@ async fn preserves_json_rpc_ids() {
 
 #[tokio::test]
 async fn preserves_batch_ids_and_order() {
-    let body = r#"[{"jsonrpc":"2.0","id":"a","method":"eth_chainId"},{"jsonrpc":"2.0","id":7,"method":"eth_blockNumber"}]"#;
+    let body = r#"[{"jsonrpc":"2.0","id":"a","method":"eth_chainId"},{"jsonrpc":"2.0","id":7,"method":"eth_getTransactionCount","params":["0x1","latest"]}]"#;
     let (direct, proxied) = compare(body).await;
     assert_eq!(direct, proxied);
     let parsed: Value = serde_json::from_str(&proxied.2).unwrap();
@@ -213,7 +107,10 @@ async fn unreachable_upstream_returns_json_rpc_error() {
     let dead_addr = dead.local_addr().unwrap();
     drop(dead);
 
-    let proxy = spawn_proxy(Url::parse(&format!("http://{dead_addr}/")).unwrap(), "{}").await;
+    let proxy = spawn_proxy(ProxyConfig::http(
+        Url::parse(&format!("http://{dead_addr}/")).unwrap(),
+    ))
+    .await;
     let response = post_raw(
         &proxy,
         r#"{"jsonrpc":"2.0","id":"x1","method":"eth_chainId"}"#,
@@ -229,17 +126,36 @@ async fn unreachable_upstream_returns_json_rpc_error() {
 
 #[tokio::test]
 async fn upstream_timeout_returns_gateway_timeout() {
-    let upstream = format!("http://{}/", spawn_upstream().await);
-    let proxy = spawn_proxy_with_timeout(
-        Url::parse(&upstream).unwrap(),
-        "{}",
-        Duration::from_millis(200),
-    )
+    let node = spawn_node().await;
+    let proxy = spawn_proxy(ProxyConfig {
+        upstream: UpstreamConfig::Http {
+            url: node.http.clone(),
+            timeout: Duration::from_millis(200),
+        },
+        ..ProxyConfig::http(node.http.clone())
+    })
     .await;
     let response = post_raw(&proxy, r#"{"jsonrpc":"2.0","id":9,"method":"slow"}"#).await;
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["id"], 9);
+}
+
+#[test]
+fn rejects_invalid_upstreams() {
+    let config = ProxyConfig::http(Url::parse("ws://127.0.0.1:8546").unwrap());
+    assert!(matches!(
+        Proxy::new(config),
+        Err(ProxyError::UnsupportedScheme(_))
+    ));
+    let config = ProxyConfig {
+        upstream_ws: Some(Url::parse("http://127.0.0.1:8546").unwrap()),
+        ..ProxyConfig::http(Url::parse("http://127.0.0.1:8545").unwrap())
+    };
+    assert!(matches!(
+        Proxy::new(config),
+        Err(ProxyError::UnsupportedWsScheme(_))
+    ));
 }
 
 #[tokio::test]
@@ -258,7 +174,7 @@ async fn delay_fault_delays_matching_requests() {
     assert_eq!(response.headers()["x-chainchaos-faults"], "delay");
     assert_eq!(
         response.text().await.unwrap(),
-        r#"{"id": 1,  "jsonrpc":"2.0", "result":"0x10"}"#,
+        r#"{"id": 1,  "jsonrpc":"2.0", "result":"0x64"}"#,
         "delay must not alter the response"
     );
     assert!(elapsed >= DELAY, "expected >= {DELAY:?}, got {elapsed:?}");
@@ -280,4 +196,22 @@ async fn delay_fault_respects_count() {
     assert_eq!(first.headers()["x-chainchaos-faults"], "delay");
     let second = post_raw(&proxy, body).await;
     assert!(second.headers().get("x-chainchaos-faults").is_none());
+}
+
+#[tokio::test]
+async fn empty_config_is_transparent_for_every_method() {
+    let (node, proxy) = setup("{}").await;
+    for body in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",true]}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"eth_getLogs","params":[{"fromBlock":"0x60"}]}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"eth_getTransactionReceipt","params":["0x000000000000000000000000000000000000000000000000000000007a000050"]}"#,
+    ] {
+        let direct = post_raw(node.http.as_str(), body)
+            .await
+            .text()
+            .await
+            .unwrap();
+        let proxied = post_raw(&proxy, body).await.text().await.unwrap();
+        assert_eq!(direct, proxied);
+    }
 }
