@@ -1,0 +1,28 @@
+[package]
+name = "chainchaos"
+description = "Blockchain-aware JSON-RPC chaos testing proxy"
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "chainchaos"
+path = "src/main.rs"
+
+[dependencies]
+chainchaos-core.workspace = true
+chainchaos-proxy.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

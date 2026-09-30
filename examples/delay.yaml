@@ -1,0 +1,20 @@
+# Phase 1 fault rules for `chainchaos proxy --config examples/delay.yaml`.
+#
+# Every matching rule fires, in order. A rule without `method` matches every
+# request. `count` limits how many times a rule fires (omit for unlimited).
+
+faults:
+  # Make log queries slow, as with an overloaded provider.
+  - type: delay
+    method: eth_getLogs
+    duration: 1500ms
+
+  # Delay the first three receipt lookups by 2 seconds.
+  - type: delay
+    method: eth_getTransactionReceipt
+    duration: 2s
+    count: 3
+
+  # Small jitter-free baseline latency on everything.
+  - type: delay
+    duration: 50ms

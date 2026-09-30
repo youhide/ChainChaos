@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/youhide/ChainChaos"
+homepage = "https://github.com/youhide/ChainChaos"
+keywords = ["ethereum", "json-rpc", "chaos-engineering", "testing", "proxy"]
+categories = ["development-tools::testing", "network-programming"]
+
+[workspace.dependencies]
+chainchaos-core = { path = "crates/chainchaos-core", version = "0.1.0" }
+chainchaos-proxy = { path = "crates/chainchaos-proxy", version = "0.1.0" }
+
+axum = "0.8"
+bytes = "1"
+clap = { version = "4.6", features = ["derive"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
