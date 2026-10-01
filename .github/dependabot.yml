@@ -8,6 +8,10 @@ updates:
       # One PR for compatible updates instead of one per crate.
       cargo-minor:
         update-types: [minor, patch]
+    ignore:
+      # Pinned to the version axum uses internally, so only one copy is
+      # compiled. Bump together with axum.
+      - dependency-name: tokio-tungstenite
 
   - package-ecosystem: github-actions
     directory: /
@@ -16,3 +20,7 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    ignore:
+      # Refs of this action select the Rust toolchain (`@stable`, `@master`),
+      # not a release of the action.
+      - dependency-name: dtolnay/rust-toolchain
