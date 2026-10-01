@@ -263,11 +263,26 @@ fn try_consume(limit: Option<u64>, fired: &AtomicU64) -> bool {
             fired.fetch_add(1, Ordering::Relaxed);
             true
         }
-        Some(limit) => fired
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                (n < limit).then_some(n + 1)
-            })
-            .is_ok(),
+        // A compare-exchange loop rather than `fetch_update`, which Rust 1.99
+        // deprecates in favour of `try_update`; that does not exist in our
+        // MSRV (1.85).
+        Some(limit) => {
+            let mut current = fired.load(Ordering::Relaxed);
+            loop {
+                if current >= limit {
+                    return false;
+                }
+                match fired.compare_exchange_weak(
+                    current,
+                    current + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return true,
+                    Err(actual) => current = actual,
+                }
+            }
+        }
     }
 }
 
@@ -397,6 +412,25 @@ mod tests {
             "window still open for HTTP"
         );
         assert!(!fires(&engine, "eth_call", at(2, 0)));
+    }
+
+    #[test]
+    fn count_limit_holds_under_contention() {
+        let fired = AtomicU64::new(0);
+        let claimed = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..1_000 {
+                        if try_consume(Some(100), &fired) {
+                            claimed.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(claimed.load(Ordering::Relaxed), 100);
+        assert_eq!(fired.load(Ordering::Relaxed), 100);
     }
 
     #[test]

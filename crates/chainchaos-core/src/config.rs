@@ -169,10 +169,10 @@ fn parse_rule(label: String, mut map: Mapping) -> Result<FaultRule, ConfigError>
         label: label.clone(),
         message,
     };
-    let common = take_common(&mut map).map_err(&invalid)?;
+    let common = take_common(&mut map).map_err(invalid)?;
     let raw: RawFault =
         serde_yaml_ng::from_value(Value::Mapping(map)).map_err(|e| invalid(e.to_string()))?;
-    let fault = raw.into_fault().map_err(&invalid)?;
+    let fault = raw.into_fault().map_err(invalid)?;
     build_rule(label.clone(), fault, common).map_err(invalid)
 }
 
