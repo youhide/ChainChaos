@@ -67,12 +67,16 @@ response contents. It never creates, modifies or re-signs transactions.
 
 ## Quick start
 
-Requires a stable Rust toolchain (1.85 or newer).
+Install with Homebrew (macOS and Linux, prebuilt binaries):
 
 ```bash
-git clone https://github.com/youhide/ChainChaos.git
-cd ChainChaos
-cargo install --path crates/chainchaos-cli
+brew install youhide/youhide/chainchaos
+```
+
+Or build from source with a stable Rust toolchain (1.85 or newer):
+
+```bash
+cargo install --git https://github.com/youhide/ChainChaos chainchaos
 ```
 
 Start a local node (for example `anvil`, which serves HTTP and WebSocket on port
@@ -419,8 +423,15 @@ cargo test --workspace
 
 Integration tests (`crates/chainchaos-proxy/tests/`) run against an in-process
 fake EVM node that serves HTTP and WebSocket on one port with a deterministic
-chain, so no real node is needed. CI runs the same commands on Linux and macOS,
-plus a build on the minimum supported Rust version (1.85).
+chain, so no real node is needed. `tests/anvil.rs` additionally runs end-to-end
+scenarios against a real Anvil node when `anvil` is on PATH (set
+`CHAINCHAOS_REQUIRE_ANVIL=1` to make a missing Anvil an error). CI runs the
+commands above on Linux and macOS, the Anvil suite with Foundry installed, and
+a build on the minimum supported Rust version (1.85).
+
+Releases: pushing a `vX.Y.Z` tag that matches the workspace version builds
+macOS and Linux binaries, publishes a GitHub release and updates the Homebrew
+formula in [youhide/homebrew-youhide](https://github.com/youhide/homebrew-youhide).
 
 ## Roadmap
 

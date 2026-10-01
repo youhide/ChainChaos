@@ -51,6 +51,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
 
+  anvil:
+    name: e2e (anvil)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p chainchaos-proxy --test anvil --locked
+        env:
+          CHAINCHAOS_REQUIRE_ANVIL: "1"
+
   msrv:
     name: msrv (1.85)
     runs-on: ubuntu-latest
