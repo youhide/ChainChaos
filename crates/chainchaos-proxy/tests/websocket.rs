@@ -176,3 +176,129 @@ async fn websocket_is_rejected_without_upstream() {
     let err = tokio_tungstenite::connect_async(url).await.unwrap_err();
     assert!(err.to_string().contains("400"), "{err}");
 }
+
+// --- JSON-RPC requests over the WebSocket go through the same faults as HTTP.
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect(proxy: &str) -> Socket {
+    let (socket, _) = tokio_tungstenite::connect_async(proxy.replacen("http://", "ws://", 1))
+        .await
+        .unwrap();
+    socket
+}
+
+async fn send(socket: &mut Socket, id: u64, method: &str, params: Value) {
+    let call = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+    socket
+        .send(Message::Text(call.to_string().into()))
+        .await
+        .unwrap();
+}
+
+/// Reads JSON messages until `n` responses (messages with an id) arrived.
+async fn responses(socket: &mut Socket, n: usize) -> Vec<Value> {
+    let mut out = Vec::new();
+    while out.len() < n {
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("response timed out")
+            .unwrap()
+            .unwrap();
+        if let Message::Text(text) = message {
+            let value: Value = serde_json::from_str(text.as_str()).unwrap();
+            if value.get("id").is_some() {
+                out.push(value);
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn ws_requests_get_response_faults() {
+    let (_, proxy) = setup("faults:\n  - { type: receipt_null }\n").await;
+    let mut socket = connect(&proxy).await;
+    send(
+        &mut socket,
+        7,
+        "eth_getTransactionReceipt",
+        json!([common::tx_hash(5)]),
+    )
+    .await;
+    let reply = responses(&mut socket, 1).await.remove(0);
+    assert_eq!(reply["id"], 7);
+    assert_eq!(reply["result"], Value::Null);
+}
+
+#[tokio::test]
+async fn ws_delayed_requests_do_not_block_others() {
+    let (_, proxy) =
+        setup("faults:\n  - { type: delay, method: eth_getLogs, duration: 400ms }\n").await;
+    let mut socket = connect(&proxy).await;
+    send(
+        &mut socket,
+        1,
+        "eth_getLogs",
+        json!([{"fromBlock": "0x60"}]),
+    )
+    .await;
+    send(&mut socket, 2, "eth_chainId", json!([])).await;
+    let replies = responses(&mut socket, 2).await;
+    assert_eq!(
+        replies[0]["id"], 2,
+        "the fast request overtakes the delayed one"
+    );
+    assert_eq!(replies[1]["id"], 1);
+}
+
+#[tokio::test]
+async fn ws_http_error_becomes_a_json_rpc_error() {
+    let (_, proxy) = setup("faults:\n  - { type: http_error, status: 429, count: 1 }\n").await;
+    let mut socket = connect(&proxy).await;
+    send(&mut socket, 3, "eth_chainId", json!([])).await;
+    send(&mut socket, 4, "eth_chainId", json!([])).await;
+    let replies = responses(&mut socket, 2).await;
+    let limited = replies.iter().find(|r| r["id"] == 3).unwrap();
+    assert_eq!(limited["error"]["code"], -32005);
+    let ok = replies.iter().find(|r| r["id"] == 4).unwrap();
+    assert_eq!(ok["result"], "0x1");
+}
+
+#[tokio::test]
+async fn ws_requests_see_the_reorged_chain() {
+    let (_, proxy) = setup(
+        "scenario:\n  - after_requests: 0\n    inject: { type: reorg, depth: 1, head: 100 }\n",
+    )
+    .await;
+    let mut socket = connect(&proxy).await;
+    send(
+        &mut socket,
+        1,
+        "eth_getBlockByNumber",
+        json!(["0x64", false]),
+    )
+    .await;
+    let block = responses(&mut socket, 1).await.remove(0);
+    assert_ne!(block["result"]["hash"], json!(block_hash(HEAD)));
+    // HTTP and WebSocket agree on the synthetic branch.
+    let over_http = common::result(&proxy, "eth_getBlockByNumber", json!(["0x64", false])).await;
+    assert_eq!(over_http["hash"], block["result"]["hash"]);
+}
+
+#[tokio::test]
+async fn ws_transaction_submit_timeout_reaches_the_node() {
+    let (node, proxy) =
+        setup("faults:\n  - { type: transaction_submit_timeout, duration: 10s }\n").await;
+    let mut socket = connect(&proxy).await;
+    send(&mut socket, 1, "eth_sendRawTransaction", json!(["0x02ab"])).await;
+    send(&mut socket, 2, "eth_chainId", json!([])).await;
+    let replies = responses(&mut socket, 1).await;
+    assert_eq!(replies[0]["id"], 2, "no answer for the submission yet");
+    assert_eq!(
+        node.chain.sent(),
+        1,
+        "but the node already has the transaction"
+    );
+}

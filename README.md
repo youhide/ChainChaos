@@ -73,10 +73,17 @@ Install with Homebrew (macOS and Linux, prebuilt binaries):
 brew install youhide/youhide/chainchaos
 ```
 
-Or build from source with a stable Rust toolchain (1.85 or newer):
+With Cargo (Rust 1.85 or newer):
 
 ```bash
-cargo install --git https://github.com/youhide/ChainChaos chainchaos
+cargo install chainchaos
+```
+
+Or with Docker (multi-arch image, listens on `0.0.0.0:9545` by default):
+
+```bash
+docker run --rm -p 9545:9545 ghcr.io/youhide/chainchaos \
+  proxy --upstream http://host.docker.internal:8545
 ```
 
 Start a local node (for example `anvil`, which serves HTTP and WebSocket on port
@@ -86,8 +93,8 @@ Start a local node (for example `anvil`, which serves HTTP and WebSocket on port
 chainchaos proxy --upstream http://127.0.0.1:8545
 ```
 
-Point your application at `http://127.0.0.1:9545` (and `ws://127.0.0.1:9545`
-for subscriptions). Without a scenario ChainChaos is fully transparent: the
+Point your application at `http://127.0.0.1:9545` (or `ws://127.0.0.1:9545`
+for WebSocket clients). Without a scenario ChainChaos is fully transparent: the
 upstream's status code, headers and body bytes are relayed unchanged.
 
 Now add some chaos:
@@ -166,7 +173,7 @@ chainchaos replay <FILE> [--scenario <FILE>] [--seed <N>] [--replay-latency] [--
 | -------------------- | ---------------- | ------------------------------------------------------------------ |
 | `--upstream`         |                  | Upstream EVM JSON-RPC endpoint (http or https).                    |
 | `--upstream-ws`      | derived          | WebSocket upstream. Defaults to `--upstream` with ws/wss (as on Anvil); pass it explicitly for Geth's separate port. |
-| `--listen`           | `127.0.0.1:9545` | Address for both HTTP (`POST /`) and WebSocket (`GET /`).          |
+| `--listen`           | `127.0.0.1:9545` | Address for HTTP (`POST /`), WebSocket (`GET /`) and metrics (`GET /metrics`). Env: `CHAINCHAOS_LISTEN`. |
 | `--scenario`         |                  | YAML fault rules and/or timed scenario (alias: `--config`).        |
 | `--seed`             | scenario's seed  | Override the scenario seed.                                        |
 | `--upstream-timeout` | `30s`            | Answer 504 if the upstream takes longer.                           |
@@ -222,8 +229,9 @@ Semantics:
   `(seed, rule, request number)`, so the same scenario, seed and request
   sequence reproduce the same behaviour. Request-count windows are exact;
   time windows depend on wall-clock timing by nature.
-- **HTTP and WebSocket are counted separately:** `after_requests` counts HTTP
-  requests for HTTP faults and subscription notifications for `ws_*` faults.
+- **One request counter for both transports:** JSON-RPC requests count the
+  same whether they arrive over HTTP or WebSocket, and every request fault
+  applies to both. `ws_*` faults count subscription notifications instead.
 - **Batches:** transport faults (delay, errors, timeouts) affect the whole
   batch if any call matches; response faults only touch matching calls.
 - **Strict parsing:** unknown fields, out-of-range values and methods outside a
@@ -260,6 +268,10 @@ Semantics:
 | Type    | Fields                                             | Behaviour |
 | ------- | -------------------------------------------------- | --------- |
 | `reorg` | `depth` (1-128), `head` (current), `transactions` (`reinclude` \| `drop`) | Replace the last `depth` blocks with a synthetic branch; see [Reorg simulation](#reorg-simulation). |
+
+Over WebSocket, request faults behave the same as over HTTP; `http_error`
+becomes a JSON-RPC error on the socket (`-32005` for 429), since a socket has
+no HTTP status.
 
 **WebSocket subscriptions (Phase 5)**
 
@@ -345,6 +357,23 @@ INFO ws{conn=1}: injecting fault fault="ws_drop" rule=faults[0] subscription=log
   (`upstream`, `injected` or `replay-miss`).
 - Credentials and API-key paths in upstream URLs are redacted from logs.
 
+### Prometheus metrics
+
+`GET /metrics` on the listen address serves counters in the Prometheus text
+format:
+
+```text
+chainchaos_requests_total 1042
+chainchaos_faults_total{fault="receipt_null",rule="faults[0]"} 3
+chainchaos_faults_total{fault="reorg",rule="scenario[0]"} 1
+chainchaos_reorgs_total 1
+chainchaos_upstream_errors_total 0
+chainchaos_ws_connections_total 2
+chainchaos_ws_notifications_total 381
+chainchaos_uptime_seconds 93.4
+chainchaos_build_info{version="0.2.0"} 1
+```
+
 ## Transparency guarantees
 
 With no matching faults, ChainChaos:
@@ -363,11 +392,30 @@ well-formed JSON-RPC error (code `-32000`) carrying the request's id.
 
 Current limitations:
 
-- HTTP faults apply to HTTP requests; over WebSocket, only subscription
-  notifications are faulted (request/response traffic on the socket passes
-  through).
 - `record` and `replay` cover HTTP traffic only.
 - One upstream at a time.
+
+## Example: a reorg-aware indexer
+
+[`examples/indexer`](examples/indexer) is a small block-and-log indexer that
+handles reorgs the usual way: it re-checks its tip, verifies `parentHash`
+links, and rolls back to the common ancestor when either breaks. Its test,
+[`examples/indexer/tests/reorg.rs`](examples/indexer/tests/reorg.rs), shows the
+intended workflow:
+
+1. Start Anvil and create some history, including a block with a contract log.
+2. Put chainchaos in front of it with a `reorg` scenario.
+3. Run the indexer through the proxy and assert that it detected the reorg,
+   rolled back exactly the replaced blocks, and re-indexed them with the new
+   hashes, including the log.
+
+Try it by hand:
+
+```bash
+anvil &
+chainchaos proxy --upstream http://127.0.0.1:8545 --scenario scenarios/reorg.yaml &
+cargo run -p chainchaos-example-indexer -- http://127.0.0.1:9545
+```
 
 ## Architecture
 
@@ -377,12 +425,13 @@ crates/
 │                      JSON-RPC inspection, .ccr recording format. No networking.
 ├── chainchaos-evm     EVM-aware mutations on serde_json::Value: lag views,
 │                      log/nonce faults, the synthetic reorg view. No I/O.
-├── chainchaos-proxy   Axum server: HTTP pipeline, WebSocket proxy, upstream
-│                      (live or replay), recorder.
+├── chainchaos-proxy   Axum server: the fault pipeline shared by HTTP and
+│                      WebSocket, upstream (live or replay), recorder, metrics.
 └── chainchaos-cli     The `chainchaos` binary: proxy / record / replay.
+examples/indexer       A reorg-aware indexer, chaos-tested against Anvil.
 ```
 
-HTTP request flow:
+Request flow (the same for HTTP and WebSocket requests):
 
 ```
 plan faults ─▶ pre-forward ─▶ rewrite request ─▶ forward ─▶ post-forward ─▶ respond
@@ -430,8 +479,10 @@ commands above on Linux and macOS, the Anvil suite with Foundry installed, and
 a build on the minimum supported Rust version (1.85).
 
 Releases: pushing a `vX.Y.Z` tag that matches the workspace version builds
-macOS and Linux binaries, publishes a GitHub release and updates the Homebrew
-formula in [youhide/homebrew-youhide](https://github.com/youhide/homebrew-youhide).
+macOS and Linux binaries, publishes a GitHub release, pushes
+`ghcr.io/youhide/chainchaos`, and updates the Homebrew formula in
+[youhide/homebrew-youhide](https://github.com/youhide/homebrew-youhide).
+Crates are published to crates.io with `cargo publish --workspace`.
 
 ## Roadmap
 
@@ -498,6 +549,7 @@ deterministic reorg scenarios.
 - [x] Dropped connection / forced reconnect, delayed, duplicated, missing and
       reordered messages, stale subscription stream
 - [x] Subscriptions follow the reorged view
+- [x] JSON-RPC requests over the socket get the same faults as HTTP (v0.2)
 
 **Success criterion:** real-time blockchain consumers can be chaos-tested.
 
@@ -523,10 +575,13 @@ integration tests.
 
 Not planned yet: multiple upstream providers and upstream disagreement
 simulation · execution client differential testing · Foundry / Anvil helpers ·
-CI integrations · Docker image · Prometheus metrics · a larger scenario
-library · fuzz-generated scenarios · stateful mempool and transaction lifecycle
-simulation · faults for WebSocket request/response traffic · WebSocket
+CI integrations · a larger scenario library · fuzz-generated scenarios ·
+stateful mempool and transaction lifecycle simulation · WebSocket
 record/replay · other blockchain ecosystems.
+
+Shipped beyond the roadmap: WebSocket request faults, Prometheus metrics,
+Docker images, Homebrew and crates.io packages, Anvil end-to-end tests and the
+example indexer.
 
 ## Principles
 

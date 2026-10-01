@@ -1,31 +1,45 @@
-//! WebSocket proxying with subscription-level faults.
+//! WebSocket proxying with request and subscription faults.
 //!
-//! Each client connection gets its own upstream connection. Client messages
-//! are forwarded unchanged. Upstream messages are forwarded unchanged too,
-//! except `eth_subscription` notifications, which pass through the reorg
-//! view and the `ws_*` faults.
+//! Each client connection gets its own upstream connection.
+//!
+//! - **JSON-RPC requests** sent over the socket go through the same fault
+//!   [`Pipeline`] as HTTP requests (and share its request counter). Requests
+//!   without faults are forwarded immediately; faulted ones run in their own
+//!   task and their response is matched back by id, so a delayed request
+//!   does not block the others (JSON-RPC over WebSocket allows out-of-order
+//!   responses).
+//! - **`eth_subscription` notifications** pass through the reorg view and the
+//!   `ws_*` faults, in order.
+//! - Everything else is forwarded unchanged.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use chainchaos_core::{Fault, Tick};
+use chainchaos_core::{Fault, InjectedFault, RpcRequest, Tick};
 use chainchaos_evm::reorg::LogFate;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tracing::{Instrument, debug, info, info_span, warn};
 use url::Url;
 
 use crate::AppState;
+use crate::pipeline::{CHAINCHAOS_ERROR_CODE, Early, Pipeline, RATE_LIMIT_CODE, json_error};
 
 /// Close code sent by `ws_disconnect` with `graceful: true`
 /// (1012 = "service restart", which well-behaved clients reconnect after).
 const FORCED_RECONNECT_CODE: u16 = 1012;
+
+/// How long a faulted request waits for its upstream response.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) async fn upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
     let Some(upstream) = state.upstream_ws.clone() else {
@@ -48,15 +62,8 @@ struct Subscriptions {
 }
 
 impl Subscriptions {
-    fn track_request(&mut self, text: &str) {
-        let Ok(value) = serde_json::from_str::<Value>(text) else {
-            return;
-        };
-        let calls = match &value {
-            Value::Array(items) => items.iter().collect(),
-            other => vec![other],
-        };
-        for call in calls {
+    fn track_request(&mut self, value: &Value) {
+        for call in calls(value) {
             if call.get("method").and_then(Value::as_str) != Some("eth_subscribe") {
                 continue;
             }
@@ -70,8 +77,8 @@ impl Subscriptions {
         }
     }
 
-    /// Classifies an upstream message: returns the subscription type for
-    /// notifications, and records subscription ids from subscribe responses.
+    /// Returns the subscription type for notifications, and records
+    /// subscription ids from subscribe responses.
     fn classify(&mut self, value: &Value) -> Classified {
         if value.get("method").and_then(Value::as_str) == Some("eth_subscription") {
             let kind = value
@@ -98,9 +105,181 @@ enum Classified {
     Other,
 }
 
+fn calls(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    }
+}
+
+/// Key matching a request to its response: the id, or the sorted ids of a
+/// batch. `None` for notifications, which get no response.
+fn response_key(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => {
+            let mut ids: Vec<String> = items
+                .iter()
+                .filter_map(|c| c.get("id"))
+                .map(Value::to_string)
+                .collect();
+            if ids.is_empty() {
+                return None;
+            }
+            ids.sort();
+            Some(format!("batch:{}", ids.join(",")))
+        }
+        other => other.get("id").map(Value::to_string),
+    }
+}
+
+/// Shared per-connection state.
+struct Conn {
+    state: Arc<AppState>,
+    id: u64,
+    subs: Mutex<Subscriptions>,
+    /// Faulted requests awaiting their upstream response, by response key.
+    awaiting: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    to_upstream: mpsc::UnboundedSender<UpstreamMessage>,
+    to_client: mpsc::UnboundedSender<Message>,
+}
+
+impl Conn {
+    fn send_client(&self, text: String) {
+        let _ = self.to_client.send(Message::Text(text.into()));
+    }
+
+    fn send_upstream(&self, text: String) {
+        let _ = self.to_upstream.send(UpstreamMessage::Text(text.into()));
+    }
+
+    /// Handles a text message from the client.
+    fn on_client_text(self: &Arc<Self>, text: String) {
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return self.send_upstream(text);
+        };
+        lock(&self.subs).track_request(&value);
+        let is_request = calls(&value)
+            .iter()
+            .any(|c| c.get("method").is_some_and(Value::is_string));
+        let is_subscription = calls(&value).iter().any(|c| {
+            matches!(
+                c.get("method").and_then(Value::as_str),
+                Some("eth_subscribe" | "eth_unsubscribe")
+            )
+        });
+        if !is_request || is_subscription {
+            return self.send_upstream(text);
+        }
+
+        let state = &self.state;
+        let seq = state.requests.fetch_add(1, Ordering::Relaxed) + 1;
+        let tick = Tick {
+            seq,
+            elapsed: state.started.elapsed(),
+        };
+        let request = RpcRequest::parse(text.as_bytes());
+        let faults = state.engine.plan(request.as_ref(), tick);
+        if faults.is_empty() && !state.chain.reorg_active() {
+            return self.send_upstream(text);
+        }
+        state.metrics.faults_planned(&faults);
+        let methods = request
+            .as_ref()
+            .map_or_else(|| "<unparsed>".to_owned(), RpcRequest::methods_summary);
+        let span = info_span!("ws_rpc", conn = self.id, seq, method = %methods);
+        let key = response_key(&value);
+        let conn = self.clone();
+        tokio::spawn(
+            async move {
+                conn.handle_request(text, request, faults, tick, key).await;
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn handle_request(
+        &self,
+        text: String,
+        request: Option<RpcRequest>,
+        mut faults: Vec<InjectedFault>,
+        tick: Tick,
+        key: Option<String>,
+    ) {
+        let pipeline = Pipeline {
+            state: &self.state,
+            request: request.as_ref(),
+            tick,
+        };
+        let error =
+            |code: i64, message: String| json_error(request.as_ref(), code, message).to_string();
+
+        if let Some(early) = pipeline.before_forward(&faults).await {
+            let reply = match early {
+                // No HTTP status on a socket: report it as a JSON-RPC error.
+                Early::HttpError { status, .. } => {
+                    let code = if status == 429 {
+                        RATE_LIMIT_CODE
+                    } else {
+                        -32603
+                    };
+                    error(code, format!("chainchaos: injected HTTP {status}"))
+                }
+                Early::Timeout { duration } => {
+                    tokio::time::sleep(duration).await;
+                    error(CHAINCHAOS_ERROR_CODE, "chainchaos: injected timeout".into())
+                }
+            };
+            return self.send_client(reply);
+        }
+
+        let head = pipeline.head_for_lag(&faults).await;
+        let body = pipeline.rewrite_request(&Bytes::from(text), &faults, head);
+        let body = String::from_utf8_lossy(&body).into_owned();
+        let Some(key) = key else {
+            // A notification: nothing comes back.
+            return self.send_upstream(body);
+        };
+
+        let (tx, rx) = oneshot::channel();
+        lock(&self.awaiting).insert(key.clone(), tx);
+        self.send_upstream(body);
+        let response = match tokio::time::timeout(RESPONSE_TIMEOUT, rx).await {
+            Ok(Ok(response)) => response,
+            _ => {
+                lock(&self.awaiting).remove(&key);
+                warn!("no upstream response on the WebSocket");
+                self.state.metrics.upstream_error();
+                return self.send_client(error(
+                    CHAINCHAOS_ERROR_CODE,
+                    "chainchaos: upstream timed out".into(),
+                ));
+            }
+        };
+
+        if let Some((f, duration)) = Pipeline::hold_after_forward(&faults) {
+            Pipeline::log_hold(f, duration, response.as_bytes());
+            tokio::time::sleep(duration).await;
+            return self.send_client(error(
+                CHAINCHAOS_ERROR_CODE,
+                "chainchaos: injected timeout".into(),
+            ));
+        }
+
+        let response = if pipeline.mutates(&faults) {
+            match pipeline.mutate_response(&Bytes::from(response.clone()), &mut faults, head) {
+                Some(mutated) => String::from_utf8_lossy(&mutated).into_owned(),
+                None => response,
+            }
+        } else {
+            response
+        };
+        self.send_client(response);
+    }
+}
+
 async fn run(client: WebSocket, state: Arc<AppState>, upstream_url: Url) {
-    let conn = state.ws_connections.fetch_add(1, Ordering::Relaxed) + 1;
-    let span = info_span!("ws", conn);
+    let conn_id = state.ws_connections.fetch_add(1, Ordering::Relaxed) + 1;
+    let span = info_span!("ws", conn = conn_id);
     async move {
         let upstream = match tokio_tungstenite::connect_async(upstream_url.as_str()).await {
             Ok((stream, _)) => stream,
@@ -117,69 +296,104 @@ async fn run(client: WebSocket, state: Arc<AppState>, upstream_url: Url) {
             }
         };
         info!("websocket connected");
-        let (mut up_tx, mut up_rx) = upstream.split();
-        let (mut client_tx, mut client_rx) = client.split();
-        let subs = Arc::new(Mutex::new(Subscriptions::default()));
+        let (mut up_sink, mut up_stream) = upstream.split();
+        let (mut client_sink, mut client_stream) = client.split();
+        let (to_upstream, mut upstream_rx) = mpsc::unbounded_channel::<UpstreamMessage>();
+        let (to_client, mut client_rx) = mpsc::unbounded_channel::<Message>();
 
-        let client_subs = subs.clone();
-        let to_upstream = async move {
-            while let Some(Ok(message)) = client_rx.next().await {
-                let forwarded = match message {
-                    Message::Text(text) => {
-                        lock(&client_subs).track_request(text.as_str());
-                        UpstreamMessage::Text(text.as_str().into())
-                    }
-                    Message::Binary(bytes) => UpstreamMessage::Binary(bytes),
-                    Message::Ping(bytes) => UpstreamMessage::Ping(bytes),
-                    Message::Pong(bytes) => UpstreamMessage::Pong(bytes),
-                    Message::Close(_) => break,
-                };
-                if up_tx.send(forwarded).await.is_err() {
+        let upstream_writer = tokio::spawn(async move {
+            while let Some(message) = upstream_rx.recv().await {
+                if up_sink.send(message).await.is_err() {
                     break;
                 }
             }
-            let _ = up_tx.close().await;
+            let _ = up_sink.close().await;
+        });
+        let client_writer = tokio::spawn(async move {
+            while let Some(message) = client_rx.recv().await {
+                let closing = matches!(message, Message::Close(_));
+                if client_sink.send(message).await.is_err() || closing {
+                    break;
+                }
+            }
+        });
+
+        let conn = Arc::new(Conn {
+            state: state.clone(),
+            id: conn_id,
+            subs: Mutex::new(Subscriptions::default()),
+            awaiting: Mutex::new(HashMap::new()),
+            to_upstream,
+            to_client,
+        });
+
+        let reader_conn = conn.clone();
+        let client_reader = async move {
+            while let Some(Ok(message)) = client_stream.next().await {
+                match message {
+                    Message::Text(text) => reader_conn.on_client_text(text.as_str().to_owned()),
+                    Message::Binary(bytes) => {
+                        let _ = reader_conn.to_upstream.send(UpstreamMessage::Binary(bytes));
+                    }
+                    Message::Ping(bytes) => {
+                        let _ = reader_conn.to_upstream.send(UpstreamMessage::Ping(bytes));
+                    }
+                    Message::Pong(bytes) => {
+                        let _ = reader_conn.to_upstream.send(UpstreamMessage::Pong(bytes));
+                    }
+                    Message::Close(_) => break,
+                }
+            }
+            Disconnect::Normal
         };
 
-        let to_client = async move {
+        let upstream_conn = conn.clone();
+        let upstream_reader = async move {
+            let conn = upstream_conn;
             let mut held: Option<String> = None;
-            while let Some(message) = up_rx.next().await {
+            while let Some(message) = up_stream.next().await {
                 let text = match message {
                     Ok(UpstreamMessage::Text(text)) => text.as_str().to_owned(),
                     Ok(UpstreamMessage::Binary(bytes)) => {
-                        if client_tx.send(Message::Binary(bytes)).await.is_err() {
-                            break;
-                        }
+                        let _ = conn.to_client.send(Message::Binary(bytes));
                         continue;
                     }
                     Ok(UpstreamMessage::Ping(bytes)) => {
-                        let _ = client_tx.send(Message::Ping(bytes)).await;
+                        let _ = conn.to_client.send(Message::Ping(bytes));
                         continue;
                     }
                     Ok(UpstreamMessage::Close(_)) | Err(_) => break,
                     Ok(_) => continue,
                 };
                 let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
-                    if client_tx.send(Message::Text(text.into())).await.is_err() {
-                        break;
-                    }
+                    conn.send_client(text);
                     continue;
                 };
-                let classified = lock(&subs).classify(&value);
+
+                // Responses to faulted requests go back to their task.
+                if value.get("method").is_none() {
+                    if let Some(key) = response_key(&value) {
+                        let waiter = lock(&conn.awaiting).remove(&key);
+                        if let Some(waiter) = waiter {
+                            let _ = waiter.send(text);
+                            continue;
+                        }
+                    }
+                }
+
+                let classified = lock(&conn.subs).classify(&value);
                 let kind = match classified {
                     Classified::Notification(kind) => kind,
                     Classified::Other => {
-                        if client_tx.send(Message::Text(text.into())).await.is_err() {
-                            break;
-                        }
+                        conn.send_client(text);
                         continue;
                     }
                 };
 
                 // The simulated chain comes first.
                 let mut outgoing = text;
-                if state.chain.reorg_active() {
-                    match rewrite_notification(&state, kind.as_deref(), &mut value) {
+                if conn.state.chain.reorg_active() {
+                    match rewrite_notification(&conn.state, kind.as_deref(), &mut value) {
                         NotificationFate::Unchanged => {}
                         NotificationFate::Changed => outgoing = value.to_string(),
                         NotificationFate::Drop => {
@@ -189,26 +403,27 @@ async fn run(client: WebSocket, state: Arc<AppState>, upstream_url: Url) {
                     }
                 }
 
-                let seq = state.ws_messages.fetch_add(1, Ordering::Relaxed) + 1;
+                let seq = conn.state.ws_messages.fetch_add(1, Ordering::Relaxed) + 1;
                 let tick = Tick {
                     seq,
-                    elapsed: state.started.elapsed(),
+                    elapsed: conn.state.started.elapsed(),
                 };
                 let mut copies = 1;
                 let mut reorder = false;
-                for f in state.engine.plan_ws(kind.as_deref(), tick) {
+                let faults = conn.state.engine.plan_ws(kind.as_deref(), tick);
+                conn.state.metrics.faults_planned(&faults);
+                for f in faults {
                     info!(fault = f.fault.name(), rule = %f.label, subscription = kind.as_deref().unwrap_or("?"), seq, "injecting fault");
                     match f.fault {
                         Fault::WsDisconnect { graceful } => {
                             if graceful {
-                                let _ = client_tx
-                                    .send(Message::Close(Some(CloseFrame {
-                                        code: FORCED_RECONNECT_CODE,
-                                        reason: "chainchaos: forced reconnect".into(),
-                                    })))
-                                    .await;
+                                let _ = conn.to_client.send(Message::Close(Some(CloseFrame {
+                                    code: FORCED_RECONNECT_CODE,
+                                    reason: "chainchaos: forced reconnect".into(),
+                                })));
+                                return Disconnect::Graceful;
                             }
-                            return;
+                            return Disconnect::Abrupt;
                         }
                         Fault::WsDelay { duration } => tokio::time::sleep(duration).await,
                         Fault::WsDuplicate => copies = 2,
@@ -225,26 +440,39 @@ async fn run(client: WebSocket, state: Arc<AppState>, upstream_url: Url) {
                     continue;
                 }
                 for _ in 0..copies {
-                    if client_tx.send(Message::Text(outgoing.clone().into())).await.is_err() {
-                        return;
-                    }
+                    conn.send_client(outgoing.clone());
                 }
                 if let Some(previous) = held.take() {
-                    if client_tx.send(Message::Text(previous.into())).await.is_err() {
-                        return;
-                    }
+                    conn.send_client(previous);
                 }
             }
+            Disconnect::Normal
         };
 
-        tokio::select! {
-            () = to_upstream => {},
-            () = to_client => {},
+        let outcome = tokio::select! {
+            outcome = client_reader => outcome,
+            outcome = upstream_reader => outcome,
+        };
+        // Let a graceful close frame (and queued messages) flush, then tear
+        // down both sides.
+        drop(conn);
+        if outcome == Disconnect::Graceful {
+            let _ = tokio::time::timeout(Duration::from_secs(1), client_writer).await;
+        } else {
+            client_writer.abort();
         }
+        upstream_writer.abort();
         info!("websocket closed");
     }
     .instrument(span)
     .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disconnect {
+    Normal,
+    Graceful,
+    Abrupt,
 }
 
 enum NotificationFate {
@@ -278,6 +506,25 @@ fn rewrite_notification(
     NotificationFate::Unchanged
 }
 
-fn lock(subs: &Mutex<Subscriptions>) -> std::sync::MutexGuard<'_, Subscriptions> {
-    subs.lock().unwrap_or_else(|e| e.into_inner())
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn response_keys_match_requests_and_responses() {
+        let single = json!({"jsonrpc":"2.0","id":"a","method":"eth_call"});
+        assert_eq!(
+            response_key(&single),
+            response_key(&json!({"id":"a","result":"0x"}))
+        );
+        let batch = json!([{"id":2,"method":"m"},{"id":1,"method":"m"},{"method":"notify"}]);
+        let reply = json!([{"id":1,"result":1},{"id":2,"result":2}]);
+        assert_eq!(response_key(&batch), response_key(&reply));
+        assert_eq!(response_key(&json!({"method":"notify"})), None);
+    }
 }

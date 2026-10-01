@@ -7,6 +7,8 @@
 
 mod chain;
 mod http;
+mod metrics;
+mod pipeline;
 mod record;
 mod upstream;
 mod ws;
@@ -18,7 +20,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::routing::post;
+use axum::routing::{get, post};
 use chainchaos_core::recording::{Recording, RecordingError, ReplayIndex};
 use chainchaos_core::{FaultConfig, FaultEngine};
 use tokio::net::TcpListener;
@@ -28,6 +30,7 @@ use url::Url;
 pub use record::RecordConfig;
 
 use chain::ChainState;
+use metrics::Metrics;
 use record::Recorder;
 use upstream::Upstream;
 
@@ -95,6 +98,7 @@ struct AppState {
     engine: FaultEngine,
     chain: ChainState,
     recorder: Option<Recorder>,
+    metrics: Metrics,
     started: Instant,
     requests: AtomicU64,
     ws_messages: AtomicU64,
@@ -146,6 +150,7 @@ impl Proxy {
                 engine: FaultEngine::new(config.faults),
                 chain: ChainState::new(seed),
                 recorder,
+                metrics: Metrics::default(),
                 started: Instant::now(),
                 requests: AtomicU64::new(0),
                 ws_messages: AtomicU64::new(0),
@@ -154,10 +159,12 @@ impl Proxy {
         })
     }
 
-    /// The axum router: `POST /` for JSON-RPC, `GET /` for WebSocket.
+    /// The axum router: `POST /` for JSON-RPC, `GET /` for WebSocket and
+    /// `GET /metrics` for Prometheus.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/", post(http::handle).get(ws::upgrade))
+            .route("/metrics", get(metrics::handle))
             .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
             .with_state(self.state.clone())
     }

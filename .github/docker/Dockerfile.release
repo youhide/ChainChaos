@@ -1,0 +1,18 @@
+# Release image: copies the prebuilt Linux binary for the target platform
+# (laid out in docker-bin/<arch>/ by the release workflow). No compilation
+# and no emulated RUN steps, so multi-arch builds are fast.
+
+FROM --platform=$BUILDPLATFORM ubuntu:24.04 AS certs
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
+
+# The release binaries are built on Ubuntu 24.04 runners, so the runtime
+# image uses the same glibc.
+FROM ubuntu:24.04
+ARG TARGETARCH
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY docker-bin/${TARGETARCH}/chainchaos /usr/local/bin/chainchaos
+ENV CHAINCHAOS_LISTEN=0.0.0.0:9545
+EXPOSE 9545
+USER 65532:65532
+ENTRYPOINT ["chainchaos"]
+CMD ["--help"]

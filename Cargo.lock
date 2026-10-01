@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "chainchaos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chainchaos-core",
  "chainchaos-proxy",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "chainchaos-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -245,15 +245,27 @@ dependencies = [
 
 [[package]]
 name = "chainchaos-evm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chainchaos-core",
  "serde_json",
 ]
 
 [[package]]
+name = "chainchaos-example-indexer"
+version = "0.2.0"
+dependencies = [
+ "chainchaos-core",
+ "chainchaos-proxy",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "chainchaos-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "bytes",

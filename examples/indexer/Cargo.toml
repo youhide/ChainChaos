@@ -1,0 +1,22 @@
+[package]
+name = "chainchaos-example-indexer"
+description = "A tiny reorg-aware indexer, chaos-tested with chainchaos"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+chainchaos-core.workspace = true
+chainchaos-proxy.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

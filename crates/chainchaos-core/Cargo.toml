@@ -1,6 +1,7 @@
 [package]
 name = "chainchaos-core"
 description = "Fault model, configuration and request inspection for chainchaos"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

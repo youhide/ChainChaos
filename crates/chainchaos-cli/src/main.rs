@@ -34,7 +34,12 @@ enum Command {
 #[derive(Debug, Args)]
 struct ListenArgs {
     /// Address to listen on.
-    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:9545")]
+    #[arg(
+        long,
+        env = "CHAINCHAOS_LISTEN",
+        value_name = "ADDR",
+        default_value = "127.0.0.1:9545"
+    )]
     listen: SocketAddr,
 }
 

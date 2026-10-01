@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "examples/indexer"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -13,14 +13,14 @@ keywords = ["ethereum", "json-rpc", "chaos-engineering", "testing", "proxy"]
 categories = ["development-tools::testing", "network-programming"]
 
 [workspace.dependencies]
-chainchaos-core = { path = "crates/chainchaos-core", version = "0.1.0" }
-chainchaos-evm = { path = "crates/chainchaos-evm", version = "0.1.0" }
-chainchaos-proxy = { path = "crates/chainchaos-proxy", version = "0.1.0" }
+chainchaos-core = { path = "crates/chainchaos-core", version = "0.2.0" }
+chainchaos-evm = { path = "crates/chainchaos-evm", version = "0.2.0" }
+chainchaos-proxy = { path = "crates/chainchaos-proxy", version = "0.2.0" }
 
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

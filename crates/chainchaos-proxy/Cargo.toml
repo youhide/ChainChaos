@@ -1,6 +1,7 @@
 [package]
 name = "chainchaos-proxy"
 description = "HTTP JSON-RPC proxy that injects chainchaos faults"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

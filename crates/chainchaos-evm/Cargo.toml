@@ -1,6 +1,7 @@
 [package]
 name = "chainchaos-evm"
 description = "EVM-aware JSON-RPC response mutations for chainchaos"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
