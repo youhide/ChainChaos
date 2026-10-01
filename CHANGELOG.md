@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The crates are marked `publish = false`; ChainChaos is distributed through
+  Homebrew, Docker images and GitHub releases, not crates.io.
+
 ## [0.2.0] - 2026-10-01
 
 ### Added
@@ -20,8 +27,6 @@ All notable changes to this project are documented here. The format follows
   default to `0.0.0.0:9545`).
 - `examples/indexer`: a reorg-aware indexer with an end-to-end test that runs
   it through chainchaos against Anvil.
-- crates.io packages: `chainchaos`, `chainchaos-core`, `chainchaos-evm`,
-  `chainchaos-proxy`.
 - Dependabot for Cargo and GitHub Actions.
 
 ### Changed
@@ -52,5 +57,6 @@ First release. Implements the whole initial roadmap:
   faults on top of replays.
 - Homebrew tap, prebuilt macOS and Linux binaries, Anvil end-to-end tests.
 
+[Unreleased]: https://github.com/youhide/ChainChaos/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/youhide/ChainChaos/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/youhide/ChainChaos/releases/tag/v0.1.0

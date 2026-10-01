@@ -13,9 +13,9 @@ keywords = ["ethereum", "json-rpc", "chaos-engineering", "testing", "proxy"]
 categories = ["development-tools::testing", "network-programming"]
 
 [workspace.dependencies]
-chainchaos-core = { path = "crates/chainchaos-core", version = "0.2.0" }
-chainchaos-evm = { path = "crates/chainchaos-evm", version = "0.2.0" }
-chainchaos-proxy = { path = "crates/chainchaos-proxy", version = "0.2.0" }
+chainchaos-core = { path = "crates/chainchaos-core" }
+chainchaos-evm = { path = "crates/chainchaos-evm" }
+chainchaos-proxy = { path = "crates/chainchaos-proxy" }
 
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"

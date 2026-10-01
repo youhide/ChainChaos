@@ -2,6 +2,7 @@
 name = "chainchaos"
 description = "Blockchain-aware JSON-RPC chaos testing proxy"
 readme = "../../README.md"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

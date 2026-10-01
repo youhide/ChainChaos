@@ -73,10 +73,10 @@ Install with Homebrew (macOS and Linux, prebuilt binaries):
 brew install youhide/youhide/chainchaos
 ```
 
-With Cargo (Rust 1.85 or newer):
+From source (Rust 1.85 or newer):
 
 ```bash
-cargo install chainchaos
+cargo install --git https://github.com/youhide/ChainChaos chainchaos
 ```
 
 Or with Docker (multi-arch image, listens on `0.0.0.0:9545` by default):
@@ -482,7 +482,6 @@ Releases: pushing a `vX.Y.Z` tag that matches the workspace version builds
 macOS and Linux binaries, publishes a GitHub release, pushes
 `ghcr.io/youhide/chainchaos`, and updates the Homebrew formula in
 [youhide/homebrew-youhide](https://github.com/youhide/homebrew-youhide).
-Crates are published to crates.io with `cargo publish --workspace`.
 
 ## Roadmap
 
@@ -580,8 +579,8 @@ stateful mempool and transaction lifecycle simulation · WebSocket
 record/replay · other blockchain ecosystems.
 
 Shipped beyond the roadmap: WebSocket request faults, Prometheus metrics,
-Docker images, Homebrew and crates.io packages, Anvil end-to-end tests and the
-example indexer.
+Docker images, the Homebrew formula, Anvil end-to-end tests and the example
+indexer.
 
 ## Principles
 
