@@ -70,7 +70,7 @@ response contents. It never creates, modifies or re-signs transactions.
 Install with Homebrew (macOS and Linux, prebuilt binaries):
 
 ```bash
-brew install youhide/youhide/chainchaos
+brew install youhide/tap/chainchaos
 ```
 
 From source (Rust 1.85 or newer):
@@ -479,9 +479,10 @@ commands above on Linux and macOS, the Anvil suite with Foundry installed, and
 a build on the minimum supported Rust version (1.85).
 
 Releases: pushing a `vX.Y.Z` tag that matches the workspace version builds
-macOS and Linux binaries, publishes a GitHub release, pushes
-`ghcr.io/youhide/chainchaos`, and updates the Homebrew formula in
-[youhide/homebrew-youhide](https://github.com/youhide/homebrew-youhide).
+macOS and Linux binaries, publishes a GitHub release, and pushes
+`ghcr.io/youhide/chainchaos`. The Homebrew formula lives in
+[youhide/homebrew-tap](https://github.com/youhide/homebrew-tap), which picks
+up the new release on its own within the hour.
 
 ## Roadmap
 

@@ -1,12 +1,11 @@
 name: Release
 
 # Builds prebuilt binaries for macOS and Linux, publishes a GitHub release,
-# pushes a multi-arch image to ghcr.io/youhide/chainchaos, and updates the
-# Homebrew formula in youhide/homebrew-youhide.
+# and pushes a multi-arch image to ghcr.io/youhide/chainchaos.
 #
-# Archive names follow the GoReleaser convention used by the other tools in
-# the tap (chainchaos_Darwin_arm64.tar.gz, ...), so the shared
-# update-tap-formula.sh script works unchanged.
+# Archive names follow GoReleaser's convention (chainchaos_Darwin_arm64.tar.gz,
+# ...) and checksums.txt is published beside them: youhide/homebrew-tap reads
+# both from the release to regenerate the formula on its own.
 
 on:
   push:
@@ -104,24 +103,6 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/checksums.txt \
             --title "${GITHUB_REF_NAME}" --generate-notes --verify-tag
 
-      - name: Update Homebrew tap formula
-        env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-          TAP_REPO: youhide/homebrew-youhide
-          RELEASE_REPO: ${{ github.repository }}
-          PROJECT_NAME: chainchaos
-          FORMULA_NAME: chainchaos
-          BINARY_NAME: chainchaos
-          DESCRIPTION: "Blockchain-aware JSON-RPC chaos testing proxy for EVM applications"
-          HOMEPAGE: "https://github.com/youhide/ChainChaos"
-          LICENSE: "MIT"
-          TAG: ${{ github.ref_name }}
-        run: |
-          if [ -z "${TAP_TOKEN}" ]; then
-            echo "::warning::HOMEBREW_TAP_GITHUB_TOKEN is not set; skipping the Homebrew tap update"
-            exit 0
-          fi
-          bash .github/scripts/update-tap-formula.sh
 
   # Tags push the image; manual runs build it for both platforms without
   # pushing, to validate the image before a release.
